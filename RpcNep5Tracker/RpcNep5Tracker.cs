@@ -283,16 +283,35 @@ namespace Neo.Plugins
         {
             UInt160 userScriptHash = GetScriptHashFromParam(_params[0].AsString());
 
+
             JObject json = new JObject();
             JArray balances = new JArray();
             json["balance"] = balances;
             json["address"] = userScriptHash.ToAddress();
             var dbCache = new DbCache<Nep5BalanceKey, Nep5Balance>(_db, null, null, Nep5BalancePrefix);
             byte[] prefix = userScriptHash.ToArray();
+
             foreach (var storageKeyValuePair in dbCache.Find(prefix))
             {
+                byte[] script;
+                using (ScriptBuilder sb = new ScriptBuilder())
+                {
+                    sb.EmitAppCall(storageKeyValuePair.Key.AssetScriptHash, "decimals");
+                    sb.EmitAppCall(storageKeyValuePair.Key.AssetScriptHash, "symbol");
+                    sb.EmitAppCall(storageKeyValuePair.Key.AssetScriptHash, "name");
+                    script = sb.ToArray();
+                }
+                ApplicationEngine engine = ApplicationEngine.Run(script);
+
                 JObject balance = new JObject();
                 balance["asset_hash"] = storageKeyValuePair.Key.AssetScriptHash.ToArray().Reverse().ToHexString();
+                if (!engine.State.HasFlag(VMState.FAULT))
+                {
+                    balance["asset_name"] = engine.ResultStack.Pop().GetString();
+                    balance["asset_symbol"] = engine.ResultStack.Pop().GetString();
+                    balance["asset_decimals"] = (byte)engine.ResultStack.Pop().GetBigInteger();
+                }
+
                 balance["amount"] = storageKeyValuePair.Value.Balance.ToString();
                 balance["last_updated_block"] = storageKeyValuePair.Value.LastUpdatedBlock;
                 balances.Add(balance);
