@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Neo.IO;
 using Neo.IO.Data.LevelDB;
 
@@ -28,6 +29,13 @@ namespace Neo.Plugins
                 SliceBuilder.Begin().Add(endKeyBytes),
                 (k, v) => new KeyValuePair<TKey, TValue>(k.ToArray().AsSerializable<TKey>(1),
                     v.ToArray().AsSerializable<TValue>()));
+        }
+
+        public static bool HasSuffix(this byte[] a, byte[] s)
+        {
+            if (a is null || s is null) return false;
+            if (a.Length < s.Length) return false;
+            return a.Skip(a.Length - s.Length).SequenceEqual(s);
         }
     }
 }

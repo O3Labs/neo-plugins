@@ -286,6 +286,60 @@ namespace Neo.Plugins
             return json;
         }
 
+        private JObject UpgradeNep5(JArray _params)
+        {
+            UInt160 oldScriptHash = GetScriptHashFromParam(_params[0].AsString());
+            UInt160 newScriptHash = GetScriptHashFromParam(_params[1].AsString());
+            var json = new JObject();
+            byte[] script;
+            using (ScriptBuilder sb = new ScriptBuilder())
+            {
+                sb.EmitAppCall(oldScriptHash, "name");
+                script = sb.ToArray();
+            }
+            using (ApplicationEngine engine = ApplicationEngine.Run(script, Blockchain.Singleton.GetSnapshot(), extraGAS: maxGas))
+            {
+                if (!engine.State.HasFlag(VMState.FAULT)) throw new RpcException(-100, "old nep5 still exists");
+            }
+            var jarr = new JArray();
+            var writeBatch = new WriteBatch();
+            var levelDbSnapshot = _db.GetSnapshot();
+            ReadOptions dbOptions = new ReadOptions { FillCache = false, Snapshot = _levelDbSnapshot };
+            var dbCache = new DbCache<Nep5BalanceKey, Nep5Balance>(_db, dbOptions, writeBatch, Nep5BalancePrefix);
+            byte[] suffix = oldScriptHash.ToArray();
+            foreach (var pair in dbCache.Find(null))
+            {
+                if (pair.Key.AssetScriptHash != oldScriptHash) continue;
+                var key = new Nep5BalanceKey(pair.Key.UserScriptHash, newScriptHash);
+                var balance = dbCache.TryGet(key);
+                if (!(balance is null)) continue;
+                balance = new Nep5Balance();
+                using (ScriptBuilder sb = new ScriptBuilder())
+                {
+                    sb.EmitAppCall(newScriptHash, "balanceOf",
+                        pair.Key.UserScriptHash.ToArray());
+                    script = sb.ToArray();
+                }
+                using (ApplicationEngine engine = ApplicationEngine.Run(script, Blockchain.Singleton.GetSnapshot(), extraGAS: maxGas))
+                {
+                    if (engine.State.HasFlag(VMState.FAULT)) continue;
+                    if (engine.ResultStack.Count <= 0) continue;
+                    balance.Balance = engine.ResultStack.Pop().GetBigInteger();
+                    balance.LastUpdatedBlock = pair.Value.LastUpdatedBlock;
+                }
+                var j = new JObject();
+                j["address"] = key.UserScriptHash.ToAddress();
+                j["balance"] = balance.Balance.ToString();
+                jarr.Add(j);
+                dbCache.Add(key, balance);
+                dbCache.Delete(pair.Key);
+            }
+            dbCache.Commit();
+            _db.Write(WriteOptions.Default, writeBatch);
+            json["update"] = jarr;
+            return json;
+        }
+
         private JObject GetNep5Balances(JArray _params)
         {
             UInt160 userScriptHash = GetScriptHashFromParam(_params[0].AsString());
@@ -333,7 +387,9 @@ namespace Neo.Plugins
         public JObject OnProcess(HttpContext context, string method, JArray _params)
         {
             if (_shouldTrackHistory && method == "getnep5transfers") return GetNep5Transfers(_params);
-            return method == "getnep5balances" ? GetNep5Balances(_params) : null;
+            if (method == "getnep5balances") return GetNep5Balances(_params);
+            if (method == "upgradenep5") return UpgradeNep5(_params);
+            return null;
         }
 
         public void PostProcess(HttpContext context, string method, JArray _params, JObject result)
